@@ -1,0 +1,115 @@
+library(SummarizedExperiment)
+library(edgeR)
+library(limma)
+library(sva)
+library(jaffelab)
+library(recount)
+
+## load data
+load("RNAseq_data/degradation_rse_phase3_caudate.rda")
+load("RNAseq_data/caudate_brainseq_phase3_hg38_rseGene_merged_n464.rda")
+
+## combine
+rse_gene = merge_rse_metrics(rse_gene)
+rse_gene$ERCCsumLogErr = mapply(function(r, n) {
+  sum(r * n)/sum(n)
+}, rse_gene$ERCCsumLogErr, rse_gene$numReads)
+colData(rse_gene)$RIN = sapply(colData(rse_gene)$RIN,"[",1)
+
+
+## load genotype data
+load("RNAseq_data/BrainSeq_Phase3_Caudate_RiboZero_MDSonly_n464.rda")
+colData(rse_gene) = cbind(colData(rse_gene), mds)
+
+## recode
+rse_gene$Dx = factor(rse_gene$Dx, levels = c("Control", "Schizo", "Bipolar"))
+
+## subset
+keepIndex = which(rse_gene$Age > 17 & rse_gene$totalAssignedGene > 0.37 &
+                    rse_gene$mitoRate < 0.1 & rse_gene$RIN > 6 & rse_gene$BrNum != "Br2585")
+#remove "Br2585" for missing drug data
+rse_gene = rse_gene[,keepIndex]
+cov_rse_caudate = cov_rse_caudate[,keepIndex]
+
+##subset to SCZ samples, add AP variable
+ind2 = rse_gene$Dx %in% c("Control", "Schizo")
+rse_gene_sz = rse_gene[,ind2]
+rse_gene_sz$Dx = droplevels(rse_gene_sz$Dx)
+rse_gene_sz$SZ = NA
+rse_gene_sz$SZ[rse_gene_sz$Dx == "Control"] = "Control"
+rse_gene_sz$SZ[rse_gene_sz$Dx == "Schizo" &  rse_gene_sz$antipsychotics] = "SZCD_AP"
+rse_gene_sz$SZ[rse_gene_sz$Dx == "Schizo" &  ! rse_gene_sz$antipsychotics] = "SCZD"
+table(rse_gene_sz$SZ)
+cov_rse_caudate = cov_rse_caudate[,ind2]
+rse_gene = rse_gene_sz
+
+##### SCZDAP vs SCZD+Control
+mod = model.matrix(~antipsychotics + Age + Sex + mitoRate + 
+                     rRNA_rate + totalAssignedGene + RIN + 
+                     ERCCsumLogErr + overallMapRate + 
+                     snpPC1 + snpPC2 + snpPC3 + snpPC4 + snpPC5,
+                   data = colData(rse_gene))
+                   
+##qSVA
+pcaDeg = prcomp(t(log2(assays(cov_rse_caudate)$count + 1)))
+#k = num.sv(log2(assays(cov_rse_caudate)$count + 1), mod) # k = 16
+k = 16
+qSVs = pcaDeg$x[,1:k]
+getPcaVars(pcaDeg)[1:k]
+modQsva = cbind(mod, qSVs)
+
+## filter expression
+rse_gene = rse_gene[rowMeans(getRPKM(rse_gene, "Length")) > 0.1,]
+degradeStats = degradeStats[rownames(rse_gene),]
+
+dge = DGEList(counts = assays(rse_gene)$counts, 
+              genes = rowData(rse_gene))
+dge = calcNormFactors(dge)
+
+##DEGs
+vGene = voom(dge,modQsva, plot=TRUE)
+fitGene = lmFit(vGene)
+eBGene = eBayes(fitGene)
+sigGene_AP = topTable(eBGene,coef=2,
+                      p.value = 1,number=nrow(fitGene), sort="none")
+
+
+                   
+                   
+##### SCZD vs. SCZDAP 
+mod = model.matrix(~SZ + Age + Sex + mitoRate + 
+                     rRNA_rate + totalAssignedGene + RIN + 
+                     ERCCsumLogErr + overallMapRate + 
+                     snpPC1 + snpPC2 + snpPC3 + snpPC4 + snpPC5,
+                   data = colData(rse_gene))
+
+##qSVA
+pcaDeg = prcomp(t(log2(assays(cov_rse_caudate)$count + 1)))
+#k = num.sv(log2(assays(cov_rse_caudate)$count + 1), mod) # k = 16
+k = 16
+qSVs = pcaDeg$x[,1:k]
+getPcaVars(pcaDeg)[1:k]
+modQsva = cbind(mod, qSVs)
+
+## filter expression
+rse_gene = rse_gene[rowMeans(getRPKM(rse_gene, "Length")) > 0.1,]
+degradeStats = degradeStats[rownames(rse_gene),]
+
+dge = DGEList(counts = assays(rse_gene)$counts, 
+              genes = rowData(rse_gene))
+dge = calcNormFactors(dge)
+
+##DEGs
+vGene = voom(dge,modQsva, plot=TRUE)
+fitGene = lmFit(vGene)
+eBGene = eBayes(fitGene)
+rxcontrast  <- makeContrasts(SZSZCD_AP-SZSCZD,levels=fitGene$design)
+APvsSCZ = topTable(eBayes(contrasts.fit(fitGene, rxcontrast)),
+                         coef=1,  p.value = 1, sort="none", n = nrow(fitGene))
+
+
+
+
+
+
+
